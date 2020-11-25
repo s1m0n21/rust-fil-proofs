@@ -1067,9 +1067,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                 tree_c_tx.send(tree_c_root).expect("send tree_c_root failed");
                 info!("tree_c done");
 
-                if devices.len() == 0 as usize {
-                    wait_tx.send(true).unwrap();
-                }
+                wait_tx.send(true).unwrap();
             });
 
             s.spawn(move |_| {
