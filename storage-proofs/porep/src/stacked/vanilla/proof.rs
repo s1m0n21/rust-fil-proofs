@@ -1068,8 +1068,10 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                 info!("tree_c done");
 
                 if devices.len() == 1 as usize {
-                    wait_tx.send(true).unwrap();
-                    trace!("send tree_c done")
+                    if !settings::SETTINGS.pc2_force_parallel {
+                        wait_tx.send(true).expect("send done failed");
+                        trace!("send tree_c done")
+                    }
                 }
             });
 
