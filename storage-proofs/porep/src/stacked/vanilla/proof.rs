@@ -1012,13 +1012,13 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
         };
 
         let (tree_c_tx, tree_c_rx) =
-            mpsc::sync_channel::<<<Tree as MerkleTreeTrait>::Hasher as Hasher>::Domain>(0);
+            mpsc::sync_channel::<<<Tree as MerkleTreeTrait>::Hasher as Hasher>::Domain>(1);
         let (tree_d_tx, tree_d_rx) =
-            mpsc::sync_channel::<(<G as Hasher>::Domain, StoreConfig)>(0);
+            mpsc::sync_channel::<(<G as Hasher>::Domain, StoreConfig)>(1);
         let (tree_r_last_tx, tree_r_last_rx) =
-            mpsc::sync_channel::<(<<Tree as MerkleTreeTrait>::Hasher as Hasher>::Domain, StoreConfig)>(0);
+            mpsc::sync_channel::<(<<Tree as MerkleTreeTrait>::Hasher as Hasher>::Domain, StoreConfig)>(1);
 
-        let (wait_tx, wait_rx) = mpsc::sync_channel::<bool>(0);
+        let (wait_tx, wait_rx) = mpsc::sync_channel::<bool>(1);
 
         rayon::scope(|s| {
             let labels = &labels;
@@ -1067,7 +1067,10 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                 tree_c_tx.send(tree_c_root).expect("send tree_c_root failed");
                 info!("tree_c done");
 
-                wait_tx.send(true).unwrap();
+                if devices.len() == 1 as usize {
+                    wait_tx.send(true).unwrap();
+                    trace!("send tree_c done")
+                }
             });
 
             s.spawn(move |_| {
