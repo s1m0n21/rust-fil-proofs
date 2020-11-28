@@ -450,7 +450,8 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                     let tree_data_tx = tree_data_tx.clone();
                     let configs = &config_slice[i];
                     let config_count = configs.len();
-                    let bus_id = device_bus_ids[i];
+                    let index = i.clone();
+                    let device_bus_ids = &device_bus_ids;
 
                     s.spawn(move |_| {
                         for i in 0..config_count {
@@ -519,11 +520,17 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                         }
                     });
                     s.spawn(move |_| {
+                        let mut typs =
+                            Vec::<Option<BatcherType>>::with_capacity(device_bus_ids.len());
+                        for bus_id in device_bus_ids.iter() {
+                            typs.push(Some(BatcherType::CustomGPU(GPUSelector::BusId(*bus_id))));
+                        };
+
                         let mut column_tree_builder = ColumnTreeBuilder::<
                             ColumnArity,
                             TreeArity,
                         >::new(
-                            Some(BatcherType::CustomGPU(GPUSelector::BusId(bus_id))),
+                            typs,
                             nodes_count,
                             max_gpu_column_batch_size,
                             max_gpu_tree_batch_size,
@@ -537,13 +544,13 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
 
                             // Just add non-final column batches.
                             if !is_final {
-                                column_tree_builder.add_columns(&columns).expect("failed to add columns");
+                                column_tree_builder.add_columns(index, &columns).expect("failed to add columns");
                                 continue;
                             };
 
                             // If we get here, this is a final column: build a sub-tree.
                             let (base_data, tree_data) =
-                                column_tree_builder.add_final_columns(&columns).expect("failed to add final columns");
+                                column_tree_builder.add_final_columns(index, &columns).expect("failed to add final columns");
                             trace!(
                                 "base data len {}, tree data len {}",
                                 base_data.len(),
