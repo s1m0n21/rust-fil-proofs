@@ -571,7 +571,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
 
                 let configs = &configs;
                 s.spawn(move |_| {
-                    let i = 0 as usize;
+                    let mut i = 0 as usize;
                     while i < configs.len() {
                         let (base_data, tree_data, config_key) =
                             tree_data_rx.recv().expect("recv tree-data filed");
