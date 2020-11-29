@@ -456,7 +456,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
 
                     s.spawn(move |_| {
                         let mut i = 0;
-                        for (index, _config) in configs.iter().enumerate() {
+                        for (index, _config) in configs {
                             let mut node_index = 0;
                             let builder_tx = builder_tx.clone();
                             while node_index != nodes_count {
@@ -561,7 +561,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                                 tree_len,
                             );
                             assert_eq!(base_data.len(), nodes_count);
-                            assert_eq!(tree_len, configs.get(&config_key).unwrap().size.expect("config size failure"));
+                            assert_eq!(tree_len, configs.get(config_key).unwrap().size.expect("config size failure"));
 
                             tree_data_tx.send((base_data, tree_data, config_key))
                                 .expect("send tree-data failed");
@@ -583,7 +583,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                             DiskStore::<<Tree::Hasher as Hasher>::Domain>::new_with_config(
                                 tree_len,
                                 Tree::Arity::to_usize(),
-                                configs[config_key].clone(),
+                                configs[*config_key].clone(),
                             ).expect("failed to create DiskStore for base tree data");
 
                         let store = Arc::new(RwLock::new(tree_c_store));
