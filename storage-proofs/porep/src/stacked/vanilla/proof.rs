@@ -625,6 +625,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                             .sync().expect("store sync failure");
                         trace!("done writing tree_c store data");
                     };
+                    i += 1;
                 });
             });
 
