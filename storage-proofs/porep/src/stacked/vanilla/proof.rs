@@ -54,6 +54,7 @@ use rust_gpu_tools::opencl::{Device, GPUSelector, BusId};
 
 use crate::encode::{decode, encode};
 use crate::PoRep;
+use std::collections::HashMap;
 
 pub const TOTAL_PARENTS: usize = 37;
 
@@ -436,9 +437,9 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
             let max_gpu_tree_batch_size = settings::SETTINGS.max_gpu_tree_batch_size as usize;
             let column_write_batch_size = settings::SETTINGS.column_write_batch_size as usize;
 
-            let mut config_slice = vec![Vec::<&StoreConfig>::new(); parallel_num];
+            let mut config_slice = vec![HashMap::new(); parallel_num];
             for (i, config) in configs.iter().enumerate() {
-                config_slice[i % parallel_num].push(config);
+                config_slice[i % parallel_num].insert(i, config);
             };
 
             rayon::scope(|s| {
@@ -453,7 +454,8 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                     let bus_id = device_bus_ids[i];
 
                     s.spawn(move |_| {
-                        for i in 0..config_count {
+                        let mut i = 0;
+                        for (index, _config) in configs.iter().enumerate() {
                             let mut node_index = 0;
                             let builder_tx = builder_tx.clone();
                             while node_index != nodes_count {
@@ -484,7 +486,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                                         layer_data.iter_mut().enumerate()
                                         {
                                             let store = labels.labels_for_layer(layer_index + 1);
-                                            let start = (i * nodes_count) + node_index;
+                                            let start = (index.clone() * nodes_count) + node_index;
                                             let end = start + chunked_nodes_count;
                                             let elements: Vec<<Tree::Hasher as Hasher>::Domain> = store
                                                 .read_range(std::ops::Range { start, end })
@@ -513,9 +515,10 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
 
                                 let is_final = node_index == nodes_count;
                                 builder_tx
-                                    .send((columns, is_final))
+                                    .send((columns, is_final, index))
                                     .expect("failed to send columns");
-                            }
+                            };
+                            i += 1;
                         }
                     });
                     s.spawn(move |_| {
@@ -532,7 +535,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                         let mut i = 0;
                         // Loop until all trees for all configs have been built.
                         while i < config_count {
-                            let (columns, is_final): (Vec<GenericArray<Fr, ColumnArity>>, bool) =
+                            let (columns, is_final, config_key) =
                                 builder_rx.recv().expect("failed to recv columns");
 
                             // Just add non-final column batches.
@@ -557,9 +560,9 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                                 tree_len,
                             );
                             assert_eq!(base_data.len(), nodes_count);
-                            assert_eq!(tree_len, configs[i].size.expect("config size failure"));
+                            assert_eq!(tree_len, configs.get(&config_key).unwrap().size.expect("config size failure"));
 
-                            tree_data_tx.send((base_data, tree_data))
+                            tree_data_tx.send((base_data, tree_data, config_key))
                                 .expect("send tree-data failed");
                             i += 1;
                         }
@@ -568,8 +571,9 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
 
                 let configs = &configs;
                 s.spawn(move |_| {
-                    for config in configs {
-                        let (base_data, tree_data) =
+                    let i = 0 as usize;
+                    while i < configs.len() {
+                        let (base_data, tree_data, config_key) =
                             tree_data_rx.recv().expect("recv tree-data filed");
                         let tree_len = base_data.len() + tree_data.len();
 
@@ -578,7 +582,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                             DiskStore::<<Tree::Hasher as Hasher>::Domain>::new_with_config(
                                 tree_len,
                                 Tree::Arity::to_usize(),
-                                config.clone(),
+                                configs[config_key].clone(),
                             ).expect("failed to create DiskStore for base tree data");
 
                         let store = Arc::new(RwLock::new(tree_c_store));
