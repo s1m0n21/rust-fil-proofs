@@ -452,6 +452,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                     let configs = &config_slice[i];
                     let config_count = configs.len();
                     let bus_id = device_bus_ids[i];
+                    if config_count == 0 { continue };
 
                     s.spawn(move |_| {
                         let mut i = 0;
