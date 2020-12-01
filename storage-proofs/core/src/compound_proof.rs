@@ -10,6 +10,7 @@ use crate::multi_proof::MultiProof;
 use crate::parameter_cache::{CacheableParameters, ParameterSetMetadata};
 use crate::partitions;
 use crate::proof::ProofScheme;
+use std::time::Instant;
 
 #[derive(Clone)]
 pub struct SetupParams<'a, S: ProofScheme<'a>> {
@@ -237,6 +238,8 @@ where
             "cannot create a circuit proof over missing vanilla proofs"
         );
 
+        info!("vanilla_proofs.len: {}", vanilla_proofs.len());
+        let start = Instant::now();
         let circuits = vanilla_proofs
             .into_par_iter()
             .enumerate()
@@ -250,6 +253,7 @@ where
                 )
             })
             .collect::<Result<Vec<_>>>()?;
+        info!("vanilla_proofs -> circuits: {:?}", start.elapsed());
 
         let groth_proofs = if priority {
             groth16::create_random_proof_batch_in_priority(circuits, groth_params, &mut rng)?

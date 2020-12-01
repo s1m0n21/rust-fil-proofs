@@ -25,7 +25,7 @@ log = "0.4.7"
 hex = "0.4.0"
 generic-array = "0.14.4"
 anyhow = "1.0.23"
-neptune = { git = "https://github.com/s1m0n21/petal-neptune", default-features = false, features = ["gpu"], branch = "test" }
+neptune = { git = "https://github.com/s1m0n21/petal-neptune", default-features = false, features = ["gpu"] }
 num_cpus = "1.10.1"
 
 [dev-dependencies]
