@@ -443,7 +443,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
             };
 
             rayon::scope(|s| {
-                let (tree_data_tx, tree_data_rx) = mpsc::sync_channel(0);
+                let (tree_data_tx, tree_data_rx) = mpsc::sync_channel(configs.len());
 
                 for i in 0..parallel_num {
                     // This channel will receive batches of columns and add them to the ColumnTreeBuilder.
