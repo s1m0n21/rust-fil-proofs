@@ -387,6 +387,14 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
         TreeArity: PoseidonArity,
     {
         if settings::SETTINGS.use_gpu_column_builder {
+            let mut device_bus_ids = device_bus_ids;
+
+            if device_bus_ids.len() == 1 {
+                if settings::SETTINGS.tree_c_force_parallel {
+                    device_bus_ids.push(device_bus_ids[0]);
+                };
+            };
+
             Self::generate_tree_c_gpu::<ColumnArity, TreeArity>(
                 layers,
                 nodes_count,
@@ -1092,7 +1100,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                 info!("tree_c done");
 
                 if devices.len() == 1 as usize {
-                    if !settings::SETTINGS.pc2_force_parallel {
+                    if !settings::SETTINGS.tree_r_last_force_parallel {
                         wait_tx.send(true).expect("send done failed");
                         trace!("send tree_c done")
                     }
@@ -1106,8 +1114,8 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                 } else if devices.len() == 1 as usize {
                     device_bus_id = devices[0].bus_id().unwrap();
 
-                    if !settings::SETTINGS.pc2_force_parallel {
-                        trace!("only one available device, waiting tree_c done");
+                    if !settings::SETTINGS.tree_r_last_force_parallel {
+                        trace!("1 available device found, waiting tree_c done");
                         wait_rx.recv().unwrap();
                     } else {
                         trace!("force parallel");

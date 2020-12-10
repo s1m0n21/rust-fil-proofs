@@ -30,7 +30,8 @@ pub struct Settings {
     pub multicore_sdr_producers: usize,
     pub multicore_sdr_producer_stride: u64,
     pub multicore_sdr_lookahead: usize,
-    pub pc2_force_parallel: bool,
+    pub tree_c_force_parallel: bool,
+    pub tree_r_last_force_parallel: bool,
 }
 
 impl Default for Settings {
@@ -55,7 +56,8 @@ impl Default for Settings {
             multicore_sdr_producers: 3,
             multicore_sdr_producer_stride: 128,
             multicore_sdr_lookahead: 800,
-            pc2_force_parallel: false,
+            tree_c_force_parallel: false,
+            tree_r_last_force_parallel: false,
         }
     }
 }
