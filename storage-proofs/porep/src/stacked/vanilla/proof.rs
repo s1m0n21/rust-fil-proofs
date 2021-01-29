@@ -389,14 +389,12 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
         if settings::SETTINGS.use_gpu_column_builder {
             let mut device_bus_ids = device_bus_ids;
 
-            for bus_id in device_bus_ids.clone() {
-                let device = Device::by_bus_id(bus_id).unwrap();
-                let mem = (device.memory() as f64 / (1024 * 1024 * 1024) as f64 * 1_f64).round() / 1_f64;
-
-                if mem as u64 >= 8 {
-                    device_bus_ids.push(bus_id)
+            let config_count = configs.len() - device_bus_ids.len();
+            if config_count > 0 {
+                for i in 0..config_count {
+                    device_bus_ids.push(device_bus_ids[i % device_bus_ids.len()])
                 };
-            }
+            };
 
             if device_bus_ids.len() == 1 {
                 if settings::SETTINGS.tree_c_force_parallel {
