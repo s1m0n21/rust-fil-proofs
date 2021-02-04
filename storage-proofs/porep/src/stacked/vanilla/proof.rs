@@ -1,4 +1,4 @@
-use std::fs::OpenOptions;
+use std::fs::{OpenOptions, remove_file};
 use std::io::Write;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
@@ -551,7 +551,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                         let mut i = 0;
                         // Loop until all trees for all configs have been built.
                         while i < config_count {
-                            let (columns, is_final, config_key) =
+                            let (columns, is_final, config_idx) =
                                 builder_rx.recv().expect("failed to recv columns");
 
                             // Just add non-final column batches.
@@ -576,9 +576,9 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                                 tree_len,
                             );
                             assert_eq!(base_data.len(), nodes_count);
-                            assert_eq!(tree_len, configs.get(config_key).unwrap().size.expect("config size failure"));
+                            assert_eq!(tree_len, configs.get(config_idx).unwrap().size.expect("config size failure"));
 
-                            tree_data_tx.send((base_data, tree_data, config_key))
+                            tree_data_tx.send((base_data, tree_data, config_idx))
                                 .expect("send tree-data failed");
                             i += 1;
                         }
@@ -589,16 +589,23 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                 s.spawn(move |_| {
                     let mut i = 0 as usize;
                     while i < configs.len() {
-                        let (base_data, tree_data, config_key) =
+                        let (base_data, tree_data, config_idx) =
                             tree_data_rx.recv().expect("recv tree-data filed");
                         let tree_len = base_data.len() + tree_data.len();
+
+                        let config = configs[*config_idx].clone();
+                        let data_path = StoreConfig::data_path(&config.path, &config.id);
+
+                        if Path::new(&data_path).exists() {
+                            remove_file(data_path.to_str().unwrap()).unwrap()
+                        };
 
                         // Persist the base and tree data to disk based using the current store config.
                         let tree_c_store =
                             DiskStore::<<Tree::Hasher as Hasher>::Domain>::new_with_config(
                                 tree_len,
                                 Tree::Arity::to_usize(),
-                                configs[*config_key].clone(),
+                                config,
                             ).expect("failed to create DiskStore for base tree data");
 
                         let store = Arc::new(RwLock::new(tree_c_store));
