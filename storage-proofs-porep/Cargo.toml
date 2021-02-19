@@ -40,6 +40,7 @@ hwloc = "0.3.0"
 libc = "0.2"
 fdlimit = "0.2.0"
 fr32 = { path = "../fr32", default-features = false }
+rust-gpu-tools = "0.3.0"
 
 [dev-dependencies]
 tempfile = "3"
