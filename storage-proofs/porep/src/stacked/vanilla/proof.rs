@@ -1118,7 +1118,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
             });
 
             s.spawn(move |_| {
-                device_bus_id = devices[0].bus_id().unwrap();
+                let device_bus_id = devices[0].bus_id().unwrap();
                 wait_rx.recv().unwrap();
 
                 // Build the MerkleTree over the original data (if needed).
