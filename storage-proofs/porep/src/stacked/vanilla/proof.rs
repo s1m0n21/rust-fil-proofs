@@ -458,7 +458,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
             };
 
             rayon::scope(|s| {
-                let (tree_data_tx, tree_data_rx) = mpsc::channel();
+                let (tree_data_tx, tree_data_rx) = mpsc::sync_channel(configs.len());
 
                 for i in 0..parallel_num {
                     // This channel will receive batches of columns and add them to the ColumnTreeBuilder.
@@ -585,17 +585,17 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                     });
                 };
 
-                let configs = &configs;
-                s.spawn(move |_| {
-                    let mut i = 0 as usize;
-                    while i < configs.len() {
-                        let (base_data, tree_data, config_idx) =
-                            tree_data_rx.recv().expect("recv tree-data filed");
-                        let tree_len = base_data.len() + tree_data.len();
+                // let configs = &configs;
+                let mut i = 0 as usize;
+                while i < configs.len() {
+                    let (base_data, tree_data, config_idx) =
+                        tree_data_rx.recv().expect("recv tree-data filed");
+                    let tree_len = base_data.len() + tree_data.len();
 
-                        let config = configs[*config_idx].clone();
-                        let data_path = StoreConfig::data_path(&config.path, &config.id);
+                    let config = configs[*config_idx].clone();
+                    let data_path = StoreConfig::data_path(&config.path, &config.id);
 
+                    s.spawn(move |_| {
                         if Path::new(&data_path).exists() {
                             remove_file(data_path.to_str().unwrap()).unwrap()
                         };
@@ -648,8 +648,8 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                             .sync().expect("store sync failure");
                         trace!("done writing tree_c store data");
                         i += 1;
-                    };
-                });
+                    });
+                };
             });
 
             create_disk_tree::<
@@ -1113,28 +1113,13 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                 tree_c_tx.send(tree_c_root).expect("send tree_c_root failed");
                 info!("tree_c done");
 
-                if devices.len() == 1 as usize {
-                    if !settings::SETTINGS.tree_r_last_force_parallel {
-                        wait_tx.send(true).expect("send done failed");
-                        trace!("send tree_c done")
-                    }
-                }
+                wait_tx.send(true).expect("send done failed");
+                trace!("send tree_c done")
             });
 
             s.spawn(move |_| {
-                let mut device_bus_id = 0 as BusId;
-                if devices.len() > 1 as usize {
-                    device_bus_id = devices[1].bus_id().unwrap();
-                } else if devices.len() == 1 as usize {
-                    device_bus_id = devices[0].bus_id().unwrap();
-
-                    if !settings::SETTINGS.tree_r_last_force_parallel {
-                        trace!("1 available device found, waiting tree_c done");
-                        wait_rx.recv().unwrap();
-                    } else {
-                        trace!("force parallel");
-                    }
-                }
+                device_bus_id = devices[0].bus_id().unwrap();
+                wait_rx.recv().unwrap();
 
                 // Build the MerkleTree over the original data (if needed).
                 let tree_d = match data_tree {
