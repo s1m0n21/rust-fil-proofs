@@ -32,6 +32,7 @@ pub struct Settings {
     pub multicore_sdr_lookahead: usize,
     pub tree_c_force_parallel: bool,
     pub tree_r_last_force_parallel: bool,
+    pub use_only_one_gpu: bool,
 }
 
 impl Default for Settings {
@@ -58,6 +59,7 @@ impl Default for Settings {
             multicore_sdr_lookahead: 800,
             tree_c_force_parallel: false,
             tree_r_last_force_parallel: false,
+            use_only_one_gpu: false,
         }
     }
 }

@@ -1071,9 +1071,13 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
             let labels = &labels;
             s.spawn(move |_| {
                 let mut device_bus_ids = Vec::new();
-                for device in devices {
-                    device_bus_ids.push(device.bus_id().unwrap());
-                };
+                if settings::SETTINGS.use_only_one_gpu {
+                    device_bus_ids.push(devices[0].bus_id().unwrap());
+                } else {
+                    for device in devices {
+                        device_bus_ids.push(device.bus_id().unwrap());
+                    };
+                }
 
                 let tree_c_root = match layers {
                     2 => {
@@ -1114,13 +1118,20 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                 tree_c_tx.send(tree_c_root).expect("send tree_c_root failed");
                 info!("tree_c done");
 
-                wait_tx.send(true).expect("send done failed");
-                trace!("send tree_c done")
+                if devices.len() == 1 {
+                    if !settings::SETTINGS.tree_r_last_force_parallel {
+                        wait_tx.send(true).expect("send done failed");
+                    };
+                };
             });
 
             s.spawn(move |_| {
                 let device_bus_id = devices[0].bus_id().unwrap();
-                wait_rx.recv().unwrap();
+                if devices.len() == 1 {
+                    if !settings::SETTINGS.tree_r_last_force_parallel {
+                        wait_rx.recv().unwrap();
+                    };
+                };
 
                 // Build the MerkleTree over the original data (if needed).
                 let tree_d = match data_tree {
