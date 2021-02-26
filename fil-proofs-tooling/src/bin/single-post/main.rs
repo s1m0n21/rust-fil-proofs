@@ -26,7 +26,7 @@ use storage_proofs::proof::ProofScheme;
 // use filecoin_proofs::api::util::{as_safe_commitment, get_base_tree_leafs, get_base_tree_size};
 
 const SECTOR_SIZE_32_GIB: u64 = 32 * 1024 * 1024 * 1024;
-const SECTOR_SIZE_512_MIB: u64 = 512 * 1024 * 1024;
+// const SECTOR_SIZE_512_MIB: u64 = 512 * 1024 * 1024;
 
 struct SimpleLogger;
 
@@ -91,7 +91,7 @@ fn main() {
             .help("Sets a custom config file")
             .takes_value(true))
         .get_matches();
-    init_log();
+    init_log().unwrap();
     let param = matches.is_present("param");
     let config = matches.value_of("config").unwrap_or("default.conf");
     println!("config: {}", config);
@@ -145,7 +145,7 @@ fn post<Tree: 'static + MerkleTreeTrait>(
     comm_r: [u8; 32],
     prover: [u8; 32],
     randomness: [u8; 32],
-    withParam: bool,
+    with_param: bool,
 ) -> Result<bool> {
     let sector_size = SectorSize(SECTOR_SIZE_32_GIB);
     let sealed_file_path = seal_file(prefix, minder_id, sector_id);
@@ -172,7 +172,7 @@ fn post<Tree: 'static + MerkleTreeTrait>(
         pub_replica_info.insert(sector_id, pub_replica);
         priv_replica_info.insert(sector_id, priv_replica);
 
-        let ret = if withParam {
+        let ret = if with_param {
             let x = generate_window_post::<Tree>(
                 &post_config, &randomness, &priv_replica_info, prover)?;
             verify_window_post::<Tree>(
@@ -189,7 +189,7 @@ fn post<Tree: 'static + MerkleTreeTrait>(
         let pub_replica_info = vec![(sector_id, pub_replica)];
         let priv_replica_info = vec![(sector_id, priv_replica)];
 
-        let ret = if withParam {
+        let ret = if with_param {
             let x = generate_winning_post::<Tree>(
                 &post_config, &randomness, &priv_replica_info[..], prover)?;
             verify_winning_post::<Tree>(
