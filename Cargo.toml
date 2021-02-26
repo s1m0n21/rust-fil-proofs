@@ -8,5 +8,6 @@ members = [
   "storage-proofs/post",
   "fil-proofs-tooling",
   "sha2raw",
-  "merkle_light"
+  "merkle_light",
+  "qiniu"
 ]
