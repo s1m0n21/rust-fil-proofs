@@ -1,4 +1,4 @@
-use std::fs::OpenOptions;
+use std::fs::{OpenOptions, remove_file};
 use std::io::Write;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
@@ -50,9 +50,11 @@ use neptune::batch_hasher::BatcherType;
 use neptune::column_tree_builder::{ColumnTreeBuilder, ColumnTreeBuilderTrait};
 use neptune::tree_builder::{TreeBuilder, TreeBuilderTrait};
 use storage_proofs_core::fr32::fr_into_bytes;
+use rust_gpu_tools::opencl::{Device, GPUSelector, BusId};
 
 use crate::encode::{decode, encode};
 use crate::PoRep;
+use std::collections::HashMap;
 
 pub const TOTAL_PARENTS: usize = 37;
 
@@ -378,18 +380,35 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
         tree_count: usize,
         configs: Vec<StoreConfig>,
         labels: &LabelsCache<Tree>,
+        device_bus_ids: Vec<BusId>,
     ) -> Result<DiskTree<Tree::Hasher, Tree::Arity, Tree::SubTreeArity, Tree::TopTreeArity>>
     where
         ColumnArity: 'static + PoseidonArity,
         TreeArity: PoseidonArity,
     {
         if settings::SETTINGS.use_gpu_column_builder {
+            let mut device_bus_ids = device_bus_ids;
+
+            let config_count = configs.len() - device_bus_ids.len();
+            if config_count > 0 {
+                for i in 0..config_count {
+                    device_bus_ids.push(device_bus_ids[i % device_bus_ids.len()])
+                };
+            };
+
+            if device_bus_ids.len() == 1 {
+                if settings::SETTINGS.tree_c_force_parallel {
+                    device_bus_ids.push(device_bus_ids[0]);
+                };
+            };
+
             Self::generate_tree_c_gpu::<ColumnArity, TreeArity>(
                 layers,
                 nodes_count,
-                tree_count,
                 configs,
                 labels,
+                device_bus_ids.clone(),
+                device_bus_ids.len(),
             )
         } else {
             Self::generate_tree_c_cpu::<ColumnArity, TreeArity>(
@@ -406,9 +425,10 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
     fn generate_tree_c_gpu<ColumnArity, TreeArity>(
         layers: usize,
         nodes_count: usize,
-        tree_count: usize,
         configs: Vec<StoreConfig>,
         labels: &LabelsCache<Tree>,
+        device_bus_ids: Vec<BusId>,
+        parallel_num: usize,
     ) -> Result<DiskTree<Tree::Hasher, Tree::Arity, Tree::SubTreeArity, Tree::TopTreeArity>>
     where
         ColumnArity: 'static + PoseidonArity,
@@ -432,129 +452,165 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
             let max_gpu_tree_batch_size = settings::SETTINGS.max_gpu_tree_batch_size as usize;
             let column_write_batch_size = settings::SETTINGS.column_write_batch_size as usize;
 
-            // This channel will receive batches of columns and add them to the ColumnTreeBuilder.
-            let (builder_tx, builder_rx) = mpsc::sync_channel(0);
+            let mut config_slice = vec![HashMap::new(); parallel_num];
+            for (i, config) in configs.iter().enumerate() {
+                config_slice[i % parallel_num].insert(i, config);
+            };
 
-            let config_count = configs.len(); // Don't move config into closure below.
             rayon::scope(|s| {
-                s.spawn(move |_| {
-                    for i in 0..config_count {
-                        let mut node_index = 0;
-                        let builder_tx = builder_tx.clone();
-                        while node_index != nodes_count {
-                            let chunked_nodes_count =
-                                std::cmp::min(nodes_count - node_index, max_gpu_column_batch_size);
-                            trace!(
-                                "processing config {}/{} with column nodes {}",
-                                i + 1,
-                                tree_count,
-                                chunked_nodes_count,
-                            );
-                            let mut columns: Vec<GenericArray<Fr, ColumnArity>> = vec![
-                                GenericArray::<Fr, ColumnArity>::generate(|_i: usize| Fr::zero());
-                                chunked_nodes_count
-                            ];
+                let (tree_data_tx, tree_data_rx) = mpsc::sync_channel(configs.len());
 
-                            // Allocate layer data array and insert a placeholder for each layer.
-                            let mut layer_data: Vec<Vec<Fr>> =
-                                vec![Vec::with_capacity(chunked_nodes_count); layers];
+                for i in 0..parallel_num {
+                    // This channel will receive batches of columns and add them to the ColumnTreeBuilder.
+                    let (builder_tx, builder_rx) = mpsc::channel();
+                    let tree_data_tx = tree_data_tx.clone();
+                    let configs = &config_slice[i];
+                    let config_count = configs.len();
+                    let bus_id = device_bus_ids[i];
+                    if config_count == 0 { continue };
 
-                            rayon::scope(|s| {
-                                // capture a shadowed version of layer_data.
-                                let layer_data: &mut Vec<_> = &mut layer_data;
+                    s.spawn(move |_| {
+                        let mut i = 0;
+                        for (index, _config) in configs {
+                            let mut node_index = 0;
+                            let builder_tx = builder_tx.clone();
+                            while node_index != nodes_count {
+                                let chunked_nodes_count =
+                                    std::cmp::min(nodes_count - node_index, max_gpu_column_batch_size);
+                                trace!(
+                                    "processing config {}/{} with column nodes {}",
+                                    i + 1,
+                                    config_count,
+                                    chunked_nodes_count,
+                                );
+                                let mut columns: Vec<GenericArray<Fr, ColumnArity>> = vec![
+                                    GenericArray::<Fr, ColumnArity>::generate(|_i: usize| Fr::zero());
+                                    chunked_nodes_count
+                                ];
 
-                                // gather all layer data in parallel.
-                                s.spawn(move |_| {
-                                    for (layer_index, layer_elements) in
+                                // Allocate layer data array and insert a placeholder for each layer.
+                                let mut layer_data: Vec<Vec<Fr>> =
+                                    vec![Vec::with_capacity(chunked_nodes_count); layers];
+
+                                rayon::scope(|s| {
+                                    // capture a shadowed version of layer_data.
+                                    let layer_data: &mut Vec<_> = &mut layer_data;
+
+                                    // gather all layer data in parallel.
+                                    s.spawn(move |_| {
+                                        for (layer_index, layer_elements) in
                                         layer_data.iter_mut().enumerate()
-                                    {
-                                        let store = labels.labels_for_layer(layer_index + 1);
-                                        let start = (i * nodes_count) + node_index;
-                                        let end = start + chunked_nodes_count;
-                                        let elements: Vec<<Tree::Hasher as Hasher>::Domain> = store
-                                            .read_range(std::ops::Range { start, end })
-                                            .expect("failed to read store range");
-                                        layer_elements.extend(elements.into_iter().map(Into::into));
-                                    }
+                                        {
+                                            let store = labels.labels_for_layer(layer_index + 1);
+                                            let start = (index.clone() * nodes_count) + node_index;
+                                            let end = start + chunked_nodes_count;
+                                            let elements: Vec<<Tree::Hasher as Hasher>::Domain> = store
+                                                .read_range(std::ops::Range { start, end })
+                                                .expect("failed to read store range");
+                                            layer_elements.extend(elements.into_iter().map(Into::into));
+                                        }
+                                    });
                                 });
-                            });
 
-                            // Copy out all layer data arranged into columns.
-                            for layer_index in 0..layers {
-                                for index in 0..chunked_nodes_count {
-                                    columns[index][layer_index] = layer_data[layer_index][index];
+                                // Copy out all layer data arranged into columns.
+                                for layer_index in 0..layers {
+                                    for index in 0..chunked_nodes_count {
+                                        columns[index][layer_index] = layer_data[layer_index][index];
+                                    }
                                 }
-                            }
 
-                            drop(layer_data);
+                                drop(layer_data);
 
-                            node_index += chunked_nodes_count;
-                            trace!(
-                                "node index {}/{}/{}",
-                                node_index,
-                                chunked_nodes_count,
-                                nodes_count,
-                            );
+                                node_index += chunked_nodes_count;
+                                trace!(
+                                    "node index {}/{}/{}",
+                                    node_index,
+                                    chunked_nodes_count,
+                                    nodes_count,
+                                );
 
-                            let is_final = node_index == nodes_count;
-                            builder_tx
-                                .send((columns, is_final))
-                                .expect("failed to send columns");
+                                let is_final = node_index == nodes_count;
+                                builder_tx
+                                    .send((columns, is_final, index))
+                                    .expect("failed to send columns");
+                            };
+                            i += 1;
                         }
-                    }
-                });
-                let configs = &configs;
-                s.spawn(move |_| {
-                    let mut column_tree_builder = ColumnTreeBuilder::<
+                    });
+                    s.spawn(move |_| {
+                        let mut column_tree_builder = ColumnTreeBuilder::<
                             ColumnArity,
-                        TreeArity,
+                            TreeArity,
                         >::new(
-                        Some(BatcherType::GPU),
-                        nodes_count,
-                        max_gpu_column_batch_size,
-                        max_gpu_tree_batch_size,
-                    ).expect("failed to create ColumnTreeBuilder");
+                            Some(BatcherType::CustomGPU(GPUSelector::BusId(bus_id))),
+                            nodes_count,
+                            max_gpu_column_batch_size,
+                            max_gpu_tree_batch_size,
+                        ).expect("failed to create ColumnTreeBuilder");
 
-                    let mut i = 0;
-                    let mut config = &configs[i];
+                        let mut i = 0;
+                        // Loop until all trees for all configs have been built.
+                        while i < config_count {
+                            let (columns, is_final, config_idx) =
+                                builder_rx.recv().expect("failed to recv columns");
 
-                    // Loop until all trees for all configs have been built.
-                    while i < configs.len() {
-                        let (columns, is_final): (Vec<GenericArray<Fr, ColumnArity>>, bool) = builder_rx.recv().expect("failed to recv columns");
+                            // Just add non-final column batches.
+                            if !is_final {
+                                column_tree_builder.add_columns(&columns).expect("failed to add columns");
+                                continue;
+                            };
 
-                        // Just add non-final column batches.
-                        if !is_final {
-                            column_tree_builder.add_columns(&columns).expect("failed to add columns");
-                            continue;
+                            // If we get here, this is a final column: build a sub-tree.
+                            let (base_data, tree_data) =
+                                column_tree_builder.add_final_columns(&columns).expect("failed to add final columns");
+                            trace!(
+                                "base data len {}, tree data len {}",
+                                base_data.len(),
+                                tree_data.len()
+                            );
+                            let tree_len = base_data.len() + tree_data.len();
+                            info!(
+                                "persisting base tree_c {}/{} of length {}",
+                                i + 1,
+                                config_count,
+                                tree_len,
+                            );
+                            assert_eq!(base_data.len(), nodes_count);
+                            assert_eq!(tree_len, configs.get(config_idx).unwrap().size.expect("config size failure"));
+
+                            tree_data_tx.send((base_data, tree_data, config_idx))
+                                .expect("send tree-data failed");
+                            i += 1;
+                        }
+                    });
+                };
+
+                // let configs = &configs;
+                let mut i = 0 as usize;
+                while i < configs.len() {
+                    let (base_data, tree_data, config_idx) =
+                        tree_data_rx.recv().expect("recv tree-data filed");
+                    let tree_len = base_data.len() + tree_data.len();
+
+                    let config = configs[*config_idx].clone();
+                    let data_path = StoreConfig::data_path(&config.path, &config.id);
+
+                    s.spawn(move |_| {
+                        if Path::new(&data_path).exists() {
+                            remove_file(data_path.to_str().unwrap()).unwrap()
                         };
-
-                        // If we get here, this is a final column: build a sub-tree.
-                        let (base_data, tree_data) = column_tree_builder.add_final_columns(&columns).expect("failed to add final columns");
-                        trace!(
-                            "base data len {}, tree data len {}",
-                            base_data.len(),
-                            tree_data.len()
-                        );
-                        let tree_len = base_data.len() + tree_data.len();
-                        info!(
-                            "persisting base tree_c {}/{} of length {}",
-                            i + 1,
-                            tree_count,
-                            tree_len,
-                        );
-                        assert_eq!(base_data.len(), nodes_count);
-                        assert_eq!(tree_len, config.size.expect("config size failure"));
 
                         // Persist the base and tree data to disk based using the current store config.
                         let tree_c_store =
                             DiskStore::<<Tree::Hasher as Hasher>::Domain>::new_with_config(
                                 tree_len,
                                 Tree::Arity::to_usize(),
-                                config.clone(),
+                                config,
                             ).expect("failed to create DiskStore for base tree data");
 
                         let store = Arc::new(RwLock::new(tree_c_store));
                         let batch_size = std::cmp::min(base_data.len(), column_write_batch_size);
+
                         let flatten_and_write_store = |data: &Vec<Fr>, offset| {
                             data.into_par_iter()
                                 .chunks(column_write_batch_size)
@@ -591,15 +647,10 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                             .expect("failed to access store for sync")
                             .sync().expect("store sync failure");
                         trace!("done writing tree_c store data");
+                    });
 
-                        // Move on to the next config.
-                        i += 1;
-                        if i == configs.len() {
-                            break;
-                        }
-                        config = &configs[i];
-                    }
-                });
+                    i += 1;
+                };
             });
 
             create_disk_tree::<
@@ -684,6 +735,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
         tree_r_last_config: StoreConfig,
         replica_path: PathBuf,
         labels: &LabelsCache<Tree>,
+        device_bus_id: BusId,
     ) -> Result<LCTree<Tree::Hasher, Tree::Arity, Tree::SubTreeArity, Tree::TopTreeArity>>
     where
         TreeArity: PoseidonArity,
@@ -771,7 +823,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                     let tree_r_last_config = &tree_r_last_config;
                     s.spawn(move |_| {
                         let mut tree_builder = TreeBuilder::<Tree::Arity>::new(
-                            Some(BatcherType::GPU),
+                            Some(BatcherType::CustomGPU(GPUSelector::BusId(device_bus_id))),
                             nodes_count,
                             max_gpu_tree_batch_size,
                             tree_r_last_config.rows_to_discard,
@@ -997,84 +1049,149 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
             LabelsCache::<Tree>::new(&label_configs).context("failed to create labels cache")?;
         let configs = split_config(tree_c_config.clone(), tree_count)?;
 
-        let tree_c_root = match layers {
-            2 => {
-                let tree_c = Self::generate_tree_c::<U2, Tree::Arity>(
-                    layers,
-                    nodes_count,
-                    tree_count,
-                    configs,
-                    &labels,
-                )?;
-                tree_c.root()
-            }
-            8 => {
-                let tree_c = Self::generate_tree_c::<U8, Tree::Arity>(
-                    layers,
-                    nodes_count,
-                    tree_count,
-                    configs,
-                    &labels,
-                )?;
-                tree_c.root()
-            }
-            11 => {
-                let tree_c = Self::generate_tree_c::<U11, Tree::Arity>(
-                    layers,
-                    nodes_count,
-                    tree_count,
-                    configs,
-                    &labels,
-                )?;
-                tree_c.root()
-            }
-            _ => panic!("Unsupported column arity"),
+        let devices = &Device::all();
+
+        for device in devices {
+            trace!("device: {}, bus_id: {}, memory: {}",
+                   device.name(),
+                   device.bus_id().unwrap(),
+                   device.memory());
         };
-        info!("tree_c done");
 
-        // Build the MerkleTree over the original data (if needed).
-        let tree_d = match data_tree {
-            Some(t) => {
-                trace!("using existing original data merkle tree");
-                assert_eq!(t.len(), 2 * (data.len() / NODE_SIZE) - 1);
+        let (tree_c_tx, tree_c_rx) =
+            mpsc::sync_channel::<<<Tree as MerkleTreeTrait>::Hasher as Hasher>::Domain>(1);
+        let (tree_d_tx, tree_d_rx) =
+            mpsc::sync_channel::<(<G as Hasher>::Domain, StoreConfig)>(1);
+        let (tree_r_last_tx, tree_r_last_rx) =
+            mpsc::sync_channel::<(<<Tree as MerkleTreeTrait>::Hasher as Hasher>::Domain, StoreConfig)>(1);
 
-                t
-            }
-            None => {
-                trace!("building merkle tree for the original data");
-                data.ensure_data()?;
-                measure_op(CommD, || {
-                    Self::build_binary_tree::<G>(data.as_ref(), tree_d_config.clone())
-                })?
-            }
-        };
-        tree_d_config.size = Some(tree_d.len());
-        assert_eq!(
-            tree_d_config.size.expect("config size failure"),
-            tree_d.len()
-        );
-        let tree_d_root = tree_d.root();
-        drop(tree_d);
+        let (wait_tx, wait_rx) = mpsc::sync_channel::<bool>(1);
 
-        // Encode original data into the last layer.
-        info!("building tree_r_last");
-        let tree_r_last = measure_op(GenerateTreeRLast, || {
-            Self::generate_tree_r_last::<Tree::Arity>(
-                &mut data,
-                nodes_count,
-                tree_count,
-                tree_r_last_config.clone(),
-                replica_path.clone(),
-                &labels,
-            )
-            .context("failed to generate tree_r_last")
-        })?;
-        info!("tree_r_last done");
+        rayon::scope(|s| {
+            let labels = &labels;
+            s.spawn(move |_| {
+                let mut device_bus_ids = Vec::new();
+                if settings::SETTINGS.use_only_one_gpu {
+                    device_bus_ids.push(devices[0].bus_id().unwrap());
+                } else {
+                    for device in devices {
+                        device_bus_ids.push(device.bus_id().unwrap());
+                    };
+                }
 
-        let tree_r_last_root = tree_r_last.root();
-        drop(tree_r_last);
+                let tree_c_root = match layers {
+                    2 => {
+                        let tree_c = Self::generate_tree_c::<U2, Tree::Arity>(
+                            layers,
+                            nodes_count,
+                            tree_count,
+                            configs,
+                            labels,
+                            device_bus_ids,
+                        ).expect("generate tree c failed");
+                        tree_c.root()
+                    }
+                    8 => {
+                        let tree_c = Self::generate_tree_c::<U8, Tree::Arity>(
+                            layers,
+                            nodes_count,
+                            tree_count,
+                            configs,
+                            labels,
+                            device_bus_ids,
+                        ).expect("generate tree c failed");
+                        tree_c.root()
+                    }
+                    11 => {
+                        let tree_c = Self::generate_tree_c::<U11, Tree::Arity>(
+                            layers,
+                            nodes_count,
+                            tree_count,
+                            configs,
+                            labels,
+                            device_bus_ids,
+                        ).expect("generate tree c failed");
+                        tree_c.root()
+                    }
+                    _ => panic!("Unsupported column arity"),
+                };
+                tree_c_tx.send(tree_c_root).expect("send tree_c_root failed");
+                info!("tree_c done");
 
-        data.drop_data();
+                if devices.len() == 1 {
+                    if !settings::SETTINGS.tree_r_last_force_parallel {
+                        wait_tx.send(true).expect("send done failed");
+                    };
+                };
+            });
+
+            s.spawn(move |_| {
+                let device_bus_id = devices[0].bus_id().unwrap();
+                if devices.len() == 1 {
+                    if !settings::SETTINGS.tree_r_last_force_parallel {
+                        wait_rx.recv().unwrap();
+                    };
+                };
+
+                // Build the MerkleTree over the original data (if needed).
+                let tree_d = match data_tree {
+                    Some(t) => {
+                        trace!("using existing original data merkle tree");
+                        assert_eq!(t.len(), 2 * (data.len() / NODE_SIZE) - 1);
+
+                        t
+                    }
+                    None => {
+                        trace!("building merkle tree for the original data");
+                        data.ensure_data().unwrap();
+                        measure_op(CommD, || {
+                            Self::build_binary_tree::<G>(data.as_ref(), tree_d_config.clone())
+                        }).expect("failed to build merkle tree")
+                    }
+                };
+                tree_d_config.size = Some(tree_d.len());
+                assert_eq!(
+                    tree_d_config.size.expect("config size failure"),
+                    tree_d.len()
+                );
+                let tree_d_root = tree_d.root();
+                drop(tree_d);
+
+                tree_d_tx.send((tree_d_root, tree_d_config))
+                    .expect("send tree_d_root failed");
+
+                // Encode original data into the last layer.
+                info!("building tree_r_last");
+                let tree_r_last = measure_op(GenerateTreeRLast, || {
+                    Self::generate_tree_r_last::<Tree::Arity>(
+                        &mut data,
+                        nodes_count,
+                        tree_count,
+                        tree_r_last_config.clone(),
+                        replica_path.clone(),
+                        &labels,
+                        device_bus_id,
+                    ).context("failed to generate tree_r_last")
+                }).expect("failed to generate tree_r_last");
+                info!("tree_r_last done");
+
+                let tree_r_last_root = tree_r_last.root();
+                drop(tree_r_last);
+
+                tree_r_last_tx.send((tree_r_last_root, tree_r_last_config))
+                    .expect("send tree_r_last_root failed");
+
+                data.drop_data();
+            });
+        });
+
+        let tree_c_root =
+            tree_c_rx.recv().expect("recv tree_c_root failed");
+        let (tree_d_root, tree_d_config) =
+            tree_d_rx.recv().expect("recv tree_d_root failed");
+        let (tree_r_last_root, tree_r_last_config) =
+            tree_r_last_rx.recv().expect("recv tree_r_last_root failed");
+
 
         // comm_r = H(comm_c || comm_r_last)
         let comm_r: <Tree::Hasher as Hasher>::Domain =
