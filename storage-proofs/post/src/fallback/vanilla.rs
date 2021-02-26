@@ -1,11 +1,11 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::marker::PhantomData;
 
 use anyhow::ensure;
 use bellperson::bls::Fr;
 use byteorder::{ByteOrder, LittleEndian};
 use generic_array::typenum::Unsigned;
-use log::{error, trace};
+use log::{error, warn, info, debug, trace};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -19,6 +19,10 @@ use storage_proofs_core::{
     sector::*,
     util::{default_rows_to_discard, NODE_SIZE},
 };
+
+use qiniu::service::storage::download::{qiniu_is_enable, read_batch, total_download_duration};
+
+use std::time::SystemTime;
 
 #[derive(Debug, Clone)]
 pub struct SetupParams {
@@ -278,11 +282,42 @@ pub fn vanilla_proof<Tree: MerkleTreeTrait>(
         Tree::Arity::to_usize(),
     );
 
+    let qiniu_enable = qiniu_is_enable();
+
+    //round 1 get ranges
+    let leaf_size = challenges.len() * 10;
+    let mut lstree_ranges: HashMap<String, Vec<(u64, u64)>> = HashMap::new();
+    let mut replica_ranges: Vec<(u64, u64)> = Vec::with_capacity(leaf_size);
+    if qiniu_enable {
+       for challenged_leaf_index in 0..challenges.len() {
+           let challenged_leaf = challenges[challenged_leaf_index];
+           tree.gen_cached_proof_v2_ranges(challenged_leaf as usize, Some(rows_to_discard),
+                                           &mut replica_ranges, &mut lstree_ranges);
+       }
+    }
+
+    // download multi range
+    let t1 = SystemTime::now();
+    let lstree_caches: HashMap<_, _> = lstree_ranges
+        .par_iter()
+        .map(|(k, v)| {
+            (k, download_ranges(k, v))
+        })
+        .collect();
+    debug!("download last tree {} qiniu-time {:?}", lstree_caches.len(), t1.elapsed());
+    let t2 = SystemTime::now();
+    let replica_data = download_ranges(&tree.get_path_v2().unwrap(), &replica_ranges);
+    debug!("download replica {} qiniu-time {:?}", 1, t2.elapsed());
+    let t3 = SystemTime::now();
+    debug!("total download  replica {} qiniu-time {:?}", 1, total_download_duration(&t3));
+
+    //round 2 proof with buffer
     let inclusion_proofs = (0..challenges.len())
         .into_par_iter()
         .map(|challenged_leaf_index| {
             let challenged_leaf = challenges[challenged_leaf_index];
-            let proof = tree.gen_cached_proof(challenged_leaf as usize, Some(rows_to_discard))?;
+            let proof = tree.gen_cached_proof_v2(challenged_leaf as usize,
+                                                 Some(rows_to_discard), &replica_data.0, &replica_data.1, &lstree_caches)?;
 
             ensure!(
                 proof.validate(challenged_leaf as usize) && proof.root() == priv_sector.comm_r_last,
@@ -355,7 +390,9 @@ impl<'a, Tree: 'a + MerkleTreeTrait> ProofScheme<'a> for FallbackPoSt<'a, Tree> 
 
         let num_sectors_per_chunk = pub_params.sector_count;
         let num_sectors = pub_inputs.sectors.len();
-
+        let mut s_buf: String = String::new();
+        let s = base64_url::encode_to_string(AsRef::<[u8]>::as_ref(&pub_inputs.randomness), &mut s_buf);
+        info!("randomness is {}", s);
         ensure!(
             num_sectors <= partition_count * num_sectors_per_chunk,
             "cannot prove the provided number of sectors: {} > {} * {}",
@@ -365,20 +402,98 @@ impl<'a, Tree: 'a + MerkleTreeTrait> ProofScheme<'a> for FallbackPoSt<'a, Tree> 
         );
 
         let mut partition_proofs = Vec::new();
+        let qiniu_enable = qiniu_is_enable();
 
         // Use `BTreeSet` so failure result will be canonically ordered (sorted).
         let mut faulty_sectors = BTreeSet::new();
 
+        //round 1 get range
+        let leaf_size = num_sectors * pub_params.challenge_count * 10;
+        let mut leaf_map: HashMap<String, (Vec<(u64, u64)>, Option<String>)> = HashMap::new();
+        let mut lstree_ranges: HashMap<String, Vec<(u64, u64)>> = HashMap::new();
+        let range_time = SystemTime::now();
         for (j, (pub_sectors_chunk, priv_sectors_chunk)) in pub_inputs
             .sectors
             .chunks(num_sectors_per_chunk)
             .zip(priv_inputs.sectors.chunks(num_sectors_per_chunk))
             .enumerate()
         {
-            trace!("proving partition {}", j);
+            info!("proving partition range {}", j);
+            if qiniu_enable {
+                for (i, (pub_sector, priv_sector)) in pub_sectors_chunk
+                    .iter()
+                    .zip(priv_sectors_chunk.iter())
+                    .enumerate()
+                {
+                    let tree = priv_sector.tree;
+                    let sector_id = pub_sector.id;
+                    let tree_leafs = tree.leafs();
+                    let rows_to_discard =
+                        default_rows_to_discard(tree_leafs, Tree::Arity::to_usize());
 
+                    let s = sector_id.to_string();
+                    let list = leaf_map
+                        .entry(s)
+                        .or_insert((Vec::with_capacity(leaf_size), tree.get_path_v2()));
+
+                    trace!(
+                        "Generating proof for tree leafs {} and arity {}",
+                        tree_leafs,
+                        Tree::Arity::to_usize(),
+                    );
+
+                    for n in 0..pub_params.challenge_count {
+                        let challenge_index = ((j * num_sectors_per_chunk + i)
+                            * pub_params.challenge_count
+                            + n) as u64;
+                        let challenged_leaf_start = generate_leaf_challenge(
+                            pub_params,
+                            pub_inputs.randomness,
+                            sector_id.into(),
+                            challenge_index,
+                        );
+                        tree.gen_cached_proof_v2_ranges(
+                            challenged_leaf_start as usize,
+                            Some(rows_to_discard),
+                            &mut list.0,
+                            &mut lstree_ranges,
+                        );
+                    }
+                }
+            }
+        }
+
+        info!("generate range time {:?}", range_time.elapsed());
+        // download multi range
+        let t1 = SystemTime::now();
+        let lstree_caches: HashMap<_, _> = lstree_ranges
+            .par_iter()
+            .map(|(k, v)| {
+                (k, download_ranges(k, v))
+            })
+            .collect();
+        info!("download last tree {} qiniu-time {:?}", lstree_caches.len(), t1.elapsed());
+        let t2 = SystemTime::now();
+        let data_map: HashMap<_, _> = leaf_map
+            .par_iter()
+            .map(|(k, v)| {
+                (k, download_ranges(&v.1.as_ref().unwrap(), &v.0))
+            })
+            .collect();
+        info!("download replica {} qiniu-time {:?}", data_map.len(), t2.elapsed());
+        let t3 = SystemTime::now();
+        info!("total download  replica {} qiniu-time {:?}", data_map.len(), total_download_duration(&t3));
+
+        // round 2, proof with the downloaded data
+        let proof_time = SystemTime::now();
+        for (j, (pub_sectors_chunk, priv_sectors_chunk)) in pub_inputs
+            .sectors
+            .chunks(num_sectors_per_chunk)
+            .zip(priv_inputs.sectors.chunks(num_sectors_per_chunk))
+            .enumerate()
+        {
+            info!("proving partition {}", j);
             let mut proofs = Vec::with_capacity(num_sectors_per_chunk);
-
             for (i, (pub_sector, priv_sector)) in pub_sectors_chunk
                 .iter()
                 .zip(priv_sectors_chunk.iter())
@@ -388,6 +503,28 @@ impl<'a, Tree: 'a + MerkleTreeTrait> ProofScheme<'a> for FallbackPoSt<'a, Tree> 
                 let sector_id = pub_sector.id;
                 let tree_leafs = tree.leafs();
                 let rows_to_discard = default_rows_to_discard(tree_leafs, Tree::Arity::to_usize());
+
+                let buf1: Vec<u8> = Vec::new();
+                let pos1: Vec<(u64, u64)> = Vec::new();
+                let err1: Option<std::io::Error> = None;
+                let mut buf = &buf1;
+                let mut pos = &pos1;
+                let mut replica_err = &err1;
+                let path = tree.get_path_v2();
+                if qiniu_enable && path.is_some() {
+                    let s = sector_id.to_string();
+                    let opt = data_map.get(&s);
+                    trace!(
+                        "Generating proof for tree leafs {} and arity {}, i {}",
+                        tree_leafs,
+                        Tree::Arity::to_usize(),
+                        i
+                    );
+                    let t = opt.unwrap();
+                    buf = &t.0;
+                    pos = &t.1;
+                    replica_err = &t.2;
+                }
 
                 trace!(
                     "Generating proof for tree leafs {} and arity {}",
@@ -404,6 +541,10 @@ impl<'a, Tree: 'a + MerkleTreeTrait> ProofScheme<'a> for FallbackPoSt<'a, Tree> 
                 for proof_or_fault in (0..pub_params.challenge_count)
                     .into_par_iter()
                     .map(|n| {
+                        if replica_err.is_some() {
+                            warn!("qiniu compute proof {:?} error {:?}",  tree.get_path_v2(), replica_err);
+                            return Ok(ProofOrFault::Fault(sector_id));
+                        }
                         let challenge_index = ((j * num_sectors_per_chunk + i)
                             * pub_params.challenge_count
                             + n) as u64;
@@ -414,9 +555,12 @@ impl<'a, Tree: 'a + MerkleTreeTrait> ProofScheme<'a> for FallbackPoSt<'a, Tree> 
                                 challenge_index,
                             );
 
-                        let proof = tree.gen_cached_proof(
+                        let proof = tree.gen_cached_proof_v2(
                             challenged_leaf_start as usize,
                             Some(rows_to_discard),
+                            buf,
+                            pos,
+                            &lstree_caches,
                         );
                         match proof {
                             Ok(proof) => {
@@ -430,10 +574,19 @@ impl<'a, Tree: 'a + MerkleTreeTrait> ProofScheme<'a> for FallbackPoSt<'a, Tree> 
                                 {
                                     Ok(ProofOrFault::Proof(proof))
                                 } else {
+                                    warn!("qiniu compute proof {} {} {} {:?} not validate {} {}", s, challenge_index,
+                                          challenged_leaf_start, tree.get_path_v2(),
+                                          proof.validate(challenged_leaf_start as usize),
+                                          proof.root() == priv_sector.comm_r_last);
                                     Ok(ProofOrFault::Fault(sector_id))
                                 }
                             }
-                            Err(_) => Ok(ProofOrFault::Fault(sector_id)),
+                            Err(_) => {
+                                let e = proof.as_ref().err();
+                                warn!("qiniu compute proof {} {} {} {:?} error {:?}", s, challenge_index,
+                                      challenged_leaf_start, tree.get_path_v2(), &e);
+                                Ok(ProofOrFault::Fault(sector_id))
+                            },
                         }
                     })
                     .collect::<Result<Vec<_>>>()?
@@ -455,7 +608,6 @@ impl<'a, Tree: 'a + MerkleTreeTrait> ProofScheme<'a> for FallbackPoSt<'a, Tree> 
                     comm_r_last: priv_sector.comm_r_last,
                 });
             }
-
             // If there were less than the required number of sectors provided, we duplicate the last one
             // to pad the proof out, such that it works in the circuit part.
             while proofs.len() < num_sectors_per_chunk {
@@ -464,6 +616,7 @@ impl<'a, Tree: 'a + MerkleTreeTrait> ProofScheme<'a> for FallbackPoSt<'a, Tree> 
 
             partition_proofs.push(Proof { sectors: proofs });
         }
+        info!("proof time {:?}", proof_time.elapsed());
 
         if faulty_sectors.is_empty() {
             Ok(partition_proofs)
@@ -608,6 +761,20 @@ impl<'a, Tree: 'a + MerkleTreeTrait> ProofScheme<'a> for FallbackPoSt<'a, Tree> 
 
         checked * public_params.challenge_count >= requirements.minimum_challenge_count
     }
+}
+
+fn download_ranges(path: &String, ranges: &Vec<(u64, u64)>) -> (Vec<u8>, Vec<(u64, u64)>, Option<std::io::Error>) {
+    let mut total_len: u64 = 0;
+    let mut pos_list: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
+    for (_index, length) in ranges {
+        // pos_list.push(((*index) << 24 | (*length), total_len));
+        total_len += *length;
+    }
+    let mut read_data: Vec<u8> = vec![0; total_len as usize];
+    let n = read_batch(path, &mut read_data, ranges, &mut pos_list);
+    debug!("download {} size is {:?}", path, n);
+
+    (read_data, pos_list, n.err())
 }
 
 #[cfg(test)]

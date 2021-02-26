@@ -11,7 +11,7 @@ readme = "README.md"
 [dependencies]
 storage-proofs-core = { path = "../core", version = "^5.0.0", default-features = false}
 rand = "0.7"
-merkletree = "0.21.0"
+merkletree = {path = "../../../merkle_light" }
 byteorder = "1"
 crossbeam = "0.8"
 sha2 = "0.9.1"
@@ -27,6 +27,8 @@ generic-array = "0.14.4"
 anyhow = "1.0.23"
 neptune = { version = "2.2.0", default-features = false, features = ["gpu"] }
 num_cpus = "1.10.1"
+qiniu = {path = "../../qiniu"}
+base64-url = "1.4.7"
 
 [dev-dependencies]
 tempfile = "3"

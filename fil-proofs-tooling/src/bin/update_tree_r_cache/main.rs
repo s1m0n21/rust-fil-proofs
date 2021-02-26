@@ -64,7 +64,7 @@ fn get_tree_r_last_root(
             base_tree_len,
             OCT_ARITY,
             &configs[0],
-            ExternalReader::new_from_path(&replica_config.path)?,
+            ExternalReader::new_from_mix_path(&replica_config.path)?,
         )?;
 
         let tree_r_last = SectorShapeBase::from_data_store(store, base_tree_leafs)?;
@@ -219,7 +219,7 @@ fn run_verify(sector_size: usize, cache: PathBuf, replica_path: PathBuf) -> Resu
             base_tree_len,
             OCT_ARITY,
             &config,
-            ExternalReader::new_from_config(&replica_config, i)?,
+            ExternalReader::new_from_mix_config(&replica_config, i)?,
         )?;
         cached_base_tree_roots.push(store.last()?);
     }

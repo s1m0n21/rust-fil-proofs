@@ -13,10 +13,11 @@ pub use proof::*;
 pub use tree::*;
 
 // Reexport here, so we don't depend on merkletree directly in other places.
+use merkletree::store::MixReader;
 pub use merkletree::store::{ExternalReader, Store};
 
 pub type DiskStore<E> = merkletree::store::DiskStore<E>;
-pub type LCStore<E> = merkletree::store::LevelCacheStore<E, std::fs::File>;
+pub type LCStore<E> = merkletree::store::LevelCacheStore<E, MixReader>;
 
 pub type MerkleStore<T> = DiskStore<T>;
 

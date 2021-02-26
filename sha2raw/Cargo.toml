@@ -33,5 +33,3 @@ rand_xorshift = "0.2.0"
 [features]
 default = ["asm"]
 asm = ["sha2-asm"]
-
-

@@ -74,7 +74,7 @@ pub fn create_lc_tree<Tree: MerkleTreeTrait>(
             base_tree_len,
             Tree::Arity::to_usize(),
             &configs[0],
-            ExternalReader::new_from_path(&replica_config.path)?,
+            ExternalReader::new_from_mix_path(&replica_config.path)?,
         )?;
 
         LCTree::from_data_store(store, base_tree_leafs)
@@ -83,10 +83,30 @@ pub fn create_lc_tree<Tree: MerkleTreeTrait>(
 
 // Given base tree configs and optionally a replica_config, returns
 // either a disktree or an lctree, specified by Tree.
-pub fn create_tree<Tree: MerkleTreeTrait>(
+// pub fn create_tree<Tree: MerkleTreeTrait>(
+//     base_tree_len: usize,
+//     configs: &[StoreConfig],
+//     replica_config: Option<&ReplicaConfig>,
+// ) -> Result<
+//     MerkleTreeWrapper<
+//         <Tree as MerkleTreeTrait>::Hasher,
+//         <Tree as MerkleTreeTrait>::Store,
+//         <Tree as MerkleTreeTrait>::Arity,
+//         <Tree as MerkleTreeTrait>::SubTreeArity,
+//         <Tree as MerkleTreeTrait>::TopTreeArity,
+//     >,
+// >
+// where
+//     Tree::Store: 'static,
+// {
+//     create_tree_v2(base_tree_len, configs, replica_config, false)
+// }
+
+pub fn create_tree_v2<Tree: MerkleTreeTrait>(
     base_tree_len: usize,
     configs: &[StoreConfig],
     replica_config: Option<&ReplicaConfig>,
+    post: bool,
 ) -> Result<
     MerkleTreeWrapper<
         <Tree as MerkleTreeTrait>::Hasher,
@@ -100,17 +120,17 @@ where
     Tree::Store: 'static,
 {
     use std::any::Any;
-
     let base_tree_leafs = get_base_tree_leafs::<Tree>(base_tree_len)?;
     let mut trees = Vec::with_capacity(configs.len());
     for i in 0..configs.len() {
-        let mut store = Tree::Store::new_with_config(
+        let mut store = Tree::Store::new_with_config_v2(
             base_tree_len,
             Tree::Arity::to_usize(),
             configs[i].clone(),
+            post,
         )?;
         if let Some(lc_store) = Any::downcast_mut::<
-            merkletree::store::LevelCacheStore<<Tree::Hasher as Hasher>::Domain, std::fs::File>,
+            merkletree::store::LevelCacheStore<<Tree::Hasher as Hasher>::Domain, MixReader>,
         >(&mut store)
         {
             ensure!(
@@ -118,7 +138,8 @@ where
                 "Cannot create LCTree without replica paths"
             );
             let replica_config = replica_config.expect("replica config failure");
-            lc_store.set_external_reader(ExternalReader::new_from_config(&replica_config, i)?)?;
+            lc_store
+                .set_external_reader(ExternalReader::new_from_mix_config(&replica_config, i)?)?;
         }
 
         if configs.len() == 1 {
@@ -428,10 +449,7 @@ where
                 merkle::MerkleTree<
                     <Tree::Hasher as Hasher>::Domain,
                     <Tree::Hasher as Hasher>::Function,
-                    merkletree::store::LevelCacheStore<
-                        <Tree::Hasher as Hasher>::Domain,
-                        std::fs::File,
-                    >,
+                    merkletree::store::LevelCacheStore<<Tree::Hasher as Hasher>::Domain, MixReader>,
                     Tree::Arity,
                     Tree::SubTreeArity,
                     Tree::TopTreeArity,

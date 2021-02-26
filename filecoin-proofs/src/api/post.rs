@@ -12,7 +12,8 @@ use storage_proofs::cache_key::CacheKey;
 use storage_proofs::compound_proof::{self, CompoundProof};
 use storage_proofs::hasher::{Domain, Hasher};
 use storage_proofs::merkle::{
-    create_tree, get_base_tree_count, split_config_and_replica, MerkleTreeTrait, MerkleTreeWrapper,
+    create_tree_v2, get_base_tree_count, split_config_and_replica, MerkleTreeTrait,
+    MerkleTreeWrapper,
 };
 use storage_proofs::multi_proof::MultiProof;
 use storage_proofs::post::fallback;
@@ -30,6 +31,12 @@ use crate::types::{
     SectorSize, SnarkProof, TemporaryAux, VanillaProof,
 };
 use crate::PoStType;
+
+use qiniu::service::storage::download::{qiniu_is_enable, reader_from_env, RangeReader};
+
+use rayon::prelude::*;
+use std::time::SystemTime;
+// use backtrace::Backtrace;
 
 /// The minimal information required about a replica, in order to be able to generate
 /// a PoSt over it.
@@ -91,19 +98,32 @@ impl<Tree: MerkleTreeTrait> std::cmp::PartialOrd for PrivateReplicaInfo<Tree> {
     }
 }
 
+fn read_aux<P: AsRef<Path>>(path: P) -> std::io::Result<Vec<u8>> {
+    let qiniu_enable = qiniu_is_enable();
+    let p_str = path.as_ref().to_str().unwrap();
+    let mut r: Option<RangeReader> = None;
+    if qiniu_enable {
+        r = reader_from_env(p_str);
+    }
+
+    if Path::new((&path).as_ref().as_os_str()).exists() || !qiniu_enable || r.is_none() {
+        return std::fs::read(path);
+    }
+    let reader = r.unwrap();
+    reader.download_bytes()
+}
+
 impl<Tree: 'static + MerkleTreeTrait> PrivateReplicaInfo<Tree> {
     pub fn new(replica: PathBuf, comm_r: Commitment, cache_dir: PathBuf) -> Result<Self> {
         ensure!(comm_r != [0; 32], "Invalid all zero commitment (comm_r)");
-
         let aux = {
             let f_aux_path = cache_dir.join(CacheKey::PAux.to_string());
-            let aux_bytes = std::fs::read(&f_aux_path)
+            let aux_bytes = read_aux(&f_aux_path)
                 .with_context(|| format!("could not read from path={:?}", f_aux_path))?;
-
             deserialize(&aux_bytes)
         }?;
 
-        ensure!(replica.exists(), "Sealed replica does not exist");
+        // ensure!(replica.exists(), "Sealed replica does not exist");
 
         Ok(PrivateReplicaInfo {
             replica,
@@ -174,7 +194,7 @@ impl<Tree: 'static + MerkleTreeTrait> PrivateReplicaInfo<Tree> {
             tree_count,
         )?;
 
-        create_tree::<Tree>(base_tree_size, &configs, Some(&replica_config))
+        create_tree_v2::<Tree>(base_tree_size, &configs, Some(&replica_config), true)
     }
 }
 
@@ -215,7 +235,7 @@ pub fn clear_cache<Tree: MerkleTreeTrait>(cache_dir: &Path) -> Result<()> {
 
     let t_aux = {
         let f_aux_path = cache_dir.to_path_buf().join(CacheKey::TAux.to_string());
-        let aux_bytes = std::fs::read(&f_aux_path)
+        let aux_bytes = read_aux(&f_aux_path)
             .with_context(|| format!("could not read from path={:?}", f_aux_path))?;
 
         deserialize(&aux_bytes)
@@ -324,6 +344,7 @@ pub fn generate_winning_post<Tree: 'static + MerkleTreeTrait>(
     replicas: &[(SectorId, PrivateReplicaInfo<Tree>)],
     prover_id: ProverId,
 ) -> Result<SnarkProof> {
+    let timestamp = SystemTime::now();
     info!("generate_winning_post:start");
     ensure!(
         post_config.typ == PoStType::Winning,
@@ -351,9 +372,9 @@ pub fn generate_winning_post<Tree: 'static + MerkleTreeTrait>(
     let pub_params: compound_proof::PublicParams<fallback::FallbackPoSt<Tree>> =
         fallback::FallbackPoStCompound::setup(&setup_params)?;
     let groth_params = get_post_params::<Tree>(&post_config)?;
-
+    let t2 = SystemTime::now();
     let trees = replicas
-        .iter()
+        .par_iter()
         .map(|(sector_id, replica)| {
             replica
                 .merkle_tree(post_config.sector_size)
@@ -362,7 +383,7 @@ pub fn generate_winning_post<Tree: 'static + MerkleTreeTrait>(
                 })
         })
         .collect::<Result<Vec<_>>>()?;
-
+    info!("winning init tree {} qiniu-time {:?}", trees.len(), t2.elapsed());
     let mut pub_sectors = Vec::with_capacity(param_sector_count);
     let mut priv_sectors = Vec::with_capacity(param_sector_count);
 
@@ -405,7 +426,7 @@ pub fn generate_winning_post<Tree: 'static + MerkleTreeTrait>(
     )?;
     let proof = proof.to_vec()?;
 
-    info!("generate_winning_post:finish");
+    info!("generate_winning_post:finish {:?}", timestamp.elapsed());
 
     Ok(proof)
 }
@@ -854,12 +875,13 @@ pub fn generate_window_post<Tree: 'static + MerkleTreeTrait>(
     replicas: &BTreeMap<SectorId, PrivateReplicaInfo<Tree>>,
     prover_id: ProverId,
 ) -> Result<SnarkProof> {
+    let timestamp = SystemTime::now();
     info!("generate_window_post:start");
     ensure!(
         post_config.typ == PoStType::Window,
         "invalid post config type"
     );
-
+    info!("thread counts {}", rayon::current_num_threads());
     let randomness_safe = as_safe_commitment(randomness, "randomness")?;
     let prover_id_safe = as_safe_commitment(&prover_id, "prover_id")?;
 
@@ -876,9 +898,9 @@ pub fn generate_window_post<Tree: 'static + MerkleTreeTrait>(
     let pub_params: compound_proof::PublicParams<fallback::FallbackPoSt<Tree>> =
         fallback::FallbackPoStCompound::setup(&setup_params)?;
     let groth_params = get_post_params::<Tree>(&post_config)?;
-
+    let t2 = SystemTime::now();
     let trees: Vec<_> = replicas
-        .iter()
+        .par_iter()
         .map(|(sector_id, replica)| {
             replica
                 .merkle_tree(post_config.sector_size)
@@ -887,7 +909,7 @@ pub fn generate_window_post<Tree: 'static + MerkleTreeTrait>(
                 })
         })
         .collect::<Result<_>>()?;
-
+    info!("window init tree {} qiniu-time {:?}", trees.len(), t2.elapsed());
     let mut pub_sectors = Vec::with_capacity(sector_count);
     let mut priv_sectors = Vec::with_capacity(sector_count);
 
@@ -927,7 +949,7 @@ pub fn generate_window_post<Tree: 'static + MerkleTreeTrait>(
         &groth_params,
     )?;
 
-    info!("generate_window_post:finish");
+    info!("generate_window_post:finish {:?}", timestamp.elapsed());
 
     Ok(proof.to_vec()?)
 }
