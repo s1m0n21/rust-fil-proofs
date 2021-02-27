@@ -38,6 +38,7 @@ byte-slice-cast = "1.0.0"
 hwloc = "0.3.0"
 libc = "0.2"
 rust-gpu-tools = "0.3.0"
+fs2 = "0.4.3"
 
 [dev-dependencies]
 tempfile = "3"
