@@ -966,7 +966,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
         let devices = Device::all();
         loop {
             for d in &devices {
-                let path = &format!("/tmp/fil-proofs.gpu.{}.lock", d.bus_id().unwrap());
+                let path = &format!("/var/tmp/fil-proofs.gpu.{}.lock", d.bus_id().unwrap());
                 if metadata(path).is_ok() {
                     let lock = File::open(path)?;
 
@@ -1247,24 +1247,42 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
     )> {
         info!("replicate_phase2");
 
-        let mut bus_id = 0 as BusId;
         let devices = Device::all();
-        if devices.len() > 0 {
-            bus_id = devices[0].bus_id().unwrap();
+        loop {
+            for d in &devices {
+                let path = &format!("/var/tmp/fil-proofs.gpu.{}.lock", d.bus_id().unwrap());
+                if metadata(path).is_ok() {
+                    let lock = File::open(path)?;
+
+                    if lock.try_lock_exclusive().is_ok() {
+                        let bus_id = d.bus_id().unwrap();
+                        trace!("Acquired GPU {} lock!", bus_id);
+
+                        let (tau, paux, taux) = Self::transform_and_replicate_layers_inner(
+                            &pp.graph,
+                            &pp.layer_challenges,
+                            data,
+                            Some(data_tree),
+                            config,
+                            replica_path,
+                            labels,
+                            bus_id,
+                        )?;
+
+                        lock.unlock()?;
+                        trace!("Released GPU {} lock!", bus_id);
+
+                        drop(lock);
+
+                        return Ok((tau, (paux, taux)))
+                    }
+                } else {
+                    let _ = File::create(path)?;
+                };
+            };
+
+            sleep(Duration::from_secs(5));
         }
-
-        let (tau, paux, taux) = Self::transform_and_replicate_layers_inner(
-            &pp.graph,
-            &pp.layer_challenges,
-            data,
-            Some(data_tree),
-            config,
-            replica_path,
-            labels,
-            bus_id,
-        )?;
-
-        Ok((tau, (paux, taux)))
     }
 
     // Assumes data is all zeros.
