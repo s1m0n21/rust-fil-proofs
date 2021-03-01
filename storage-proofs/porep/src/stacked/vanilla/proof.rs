@@ -390,21 +390,6 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
         TreeArity: PoseidonArity,
     {
         if settings::SETTINGS.use_gpu_column_builder {
-            let mut device_bus_ids = device_bus_ids;
-
-            let config_count = configs.len() - device_bus_ids.len();
-            if config_count > 0 {
-                for i in 0..config_count {
-                    device_bus_ids.push(device_bus_ids[i % device_bus_ids.len()])
-                };
-            };
-
-            if device_bus_ids.len() == 1 {
-                if settings::SETTINGS.tree_c_force_parallel {
-                    device_bus_ids.push(device_bus_ids[0]);
-                };
-            };
-
             Self::generate_tree_c_gpu::<ColumnArity, TreeArity>(
                 layers,
                 nodes_count,
