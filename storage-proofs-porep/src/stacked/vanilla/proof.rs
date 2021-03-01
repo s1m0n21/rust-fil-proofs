@@ -29,7 +29,7 @@ use storage_proofs_core::{
     settings::SETTINGS,
     util::{default_rows_to_discard, NODE_SIZE},
 };
-use rust_gpu_tools::opencl::{ Device, BusId, GPUSelector };
+use rust_gpu_tools::opencl::{Device, BusId, GPUSelector};
 
 use crate::{
     encode::{decode, encode},
@@ -49,6 +49,7 @@ use crate::{
     PoRep,
 };
 use std::collections::HashMap;
+use std::sync::mpsc;
 
 pub const TOTAL_PARENTS: usize = 37;
 
@@ -179,7 +180,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                         let mut encoding_proof = None;
 
                         for layer in 1..=layers {
-                            trace!("  encoding proof layer {}", layer,);
+                            trace!("  encoding proof layer {}", layer, );
                             let parents_data: Vec<<Tree::Hasher as Hasher>::Domain> = if layer == 1
                             {
                                 let mut parents = vec![0; graph.base_graph().degree()];
@@ -375,9 +376,9 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
         labels: &LabelsCache<Tree>,
         device_bus_ids: Vec<BusId>,
     ) -> Result<DiskTree<Tree::Hasher, Tree::Arity, Tree::SubTreeArity, Tree::TopTreeArity>>
-    where
-        ColumnArity: 'static + PoseidonArity,
-        TreeArity: PoseidonArity,
+        where
+            ColumnArity: 'static + PoseidonArity,
+            TreeArity: PoseidonArity,
     {
         if SETTINGS.use_gpu_column_builder {
             let mut device_bus_ids = device_bus_ids;
@@ -415,9 +416,9 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
         configs: Vec<StoreConfig>,
         labels: &LabelsCache<Tree>,
     ) -> Result<DiskTree<Tree::Hasher, Tree::Arity, Tree::SubTreeArity, Tree::TopTreeArity>>
-    where
-        ColumnArity: 'static + PoseidonArity,
-        TreeArity: PoseidonArity,
+        where
+            ColumnArity: 'static + PoseidonArity,
+            TreeArity: PoseidonArity,
     {
         Self::generate_tree_c_cpu::<ColumnArity, TreeArity>(
             layers,
@@ -437,12 +438,11 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
         labels: &LabelsCache<Tree>,
         device_bus_ids: Vec<BusId>,
     ) -> Result<DiskTree<Tree::Hasher, Tree::Arity, Tree::SubTreeArity, Tree::TopTreeArity>>
-    where
-        ColumnArity: 'static + PoseidonArity,
-        TreeArity: PoseidonArity,
+        where
+            ColumnArity: 'static + PoseidonArity,
+            TreeArity: PoseidonArity,
     {
-        use std::cmp::min;
-        use std::sync::{mpsc::channel, Arc, RwLock};
+        use std::sync::{Arc, RwLock};
 
         use bellperson::bls::Fr;
         use ff::Field;
@@ -489,7 +489,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                     let configs = &config_slice[i];
                     let config_count = configs.len();
                     let bus_id = device_bus_ids[i];
-                    if config_count == 0 { continue };
+                    if config_count == 0 { continue; };
 
                     s.spawn(move |_| {
                         let mut i = 0;
@@ -510,60 +510,60 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                                     chunked_nodes_count
                                 ];
 
-                            // Allocate layer data array and insert a placeholder for each layer.
-                            let mut layer_data: Vec<Vec<u8>> =
-                                vec![
-                                    vec![0u8; chunked_nodes_count * std::mem::size_of::<Fr>()];
-                                    layers
-                                ];
+                                // Allocate layer data array and insert a placeholder for each layer.
+                                let mut layer_data: Vec<Vec<u8>> =
+                                    vec![
+                                        vec![0u8; chunked_nodes_count * std::mem::size_of::<Fr>()];
+                                        layers
+                                    ];
 
                                 rayon::scope(|s| {
                                     // capture a shadowed version of layer_data.
                                     let layer_data: &mut Vec<_> = &mut layer_data;
 
-                                // gather all layer data in parallel.
-                                s.spawn(move |_| {
-                                    for (layer_index, mut layer_bytes) in
+                                    // gather all layer data in parallel.
+                                    s.spawn(move |_| {
+                                        for (layer_index, mut layer_bytes) in
                                         layer_data.iter_mut().enumerate()
-                                    {
-                                        let store = labels.labels_for_layer(layer_index + 1);
-                                        let start = (index.clone() * nodes_count) + node_index;
-                                        let end = start + chunked_nodes_count;
+                                        {
+                                            let store = labels.labels_for_layer(layer_index + 1);
+                                            let start = (index.clone() * nodes_count) + node_index;
+                                            let end = start + chunked_nodes_count;
 
-                                        store
-                                            .read_range_into(start, end, &mut layer_bytes)
-                                            .expect("failed to read store range");
-                                    }
+                                            store
+                                                .read_range_into(start, end, &mut layer_bytes)
+                                                .expect("failed to read store range");
+                                        }
+                                    });
                                 });
-                            });
 
-                            let mut buf = [0u8; std::mem::size_of::<Fr>()];
-                            for layer_index in 0..layers {
-                                for index in 0..chunked_nodes_count {
-                                    buf.copy_from_slice(
-                                        &layer_data[layer_index][std::mem::size_of::<Fr>() * index
-                                            ..std::mem::size_of::<Fr>() * (index + 1)],
-                                    );
-                                    let fr = unsafe {
-                                        // SAFETY: We know the underlying elements of the layers in `LabelsCache`
-                                        // were stored on disk with the same memory layout as `Fr`.
-                                        std::mem::transmute::<[u8; std::mem::size_of::<Fr>()], Fr>(
-                                            buf,
-                                        )
-                                    };
-                                    columns[index][layer_index] = fr;
+                                let mut buf = [0u8; std::mem::size_of::<Fr>()];
+                                for layer_index in 0..layers {
+                                    for index in 0..chunked_nodes_count {
+                                        buf.copy_from_slice(
+                                            &layer_data[layer_index][std::mem::size_of::<Fr>() * index
+                                                ..std::mem::size_of::<Fr>() * (index + 1)],
+                                        );
+                                        let fr = unsafe {
+                                            // SAFETY: We know the underlying elements of the layers in `LabelsCache`
+                                            // were stored on disk with the same memory layout as `Fr`.
+                                            std::mem::transmute::<[u8; std::mem::size_of::<Fr>()], Fr>(
+                                                buf,
+                                            )
+                                        };
+                                        columns[index][layer_index] = fr;
+                                    }
                                 }
-                            }
 
-                            drop(layer_data);
+                                drop(layer_data);
 
-                            node_index += chunked_nodes_count;
-                            trace!(
-                                "node index {}/{}/{}",
-                                node_index,
-                                chunked_nodes_count,
-                                nodes_count,
-                            );
+                                node_index += chunked_nodes_count;
+                                trace!(
+                                    "node index {}/{}/{}",
+                                    node_index,
+                                    chunked_nodes_count,
+                                    nodes_count,
+                                );
 
                                 let is_final = node_index == nodes_count;
                                 builder_tx
@@ -572,17 +572,16 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                             };
                             i += 1;
                         }
-                    }
-                });
-                s.spawn(move |_| {
-                    let mut column_tree_builder = ColumnTreeBuilder::<ColumnArity, TreeArity>::new(
-                        #[cfg(feature = "gpu")]
-                        Some(BatcherType::CustomGPU(GPUSelector::BusId(bus_id))),
-                        nodes_count,
-                        max_gpu_column_batch_size,
-                        max_gpu_tree_batch_size,
-                    )
-                    .expect("failed to create ColumnTreeBuilder");
+                    });
+                    s.spawn(move |_| {
+                        let mut column_tree_builder = ColumnTreeBuilder::<ColumnArity, TreeArity>::new(
+                            #[cfg(feature = "gpu")]
+                                Some(BatcherType::CustomGPU(GPUSelector::BusId(bus_id))),
+                            nodes_count,
+                            max_gpu_column_batch_size,
+                            max_gpu_tree_batch_size,
+                        )
+                            .expect("failed to create ColumnTreeBuilder");
 
                         let mut i = 0;
                         // Loop until all trees for all configs have been built.
@@ -701,9 +700,9 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
         configs: Vec<StoreConfig>,
         labels: &LabelsCache<Tree>,
     ) -> Result<DiskTree<Tree::Hasher, Tree::Arity, Tree::SubTreeArity, Tree::TopTreeArity>>
-    where
-        ColumnArity: PoseidonArity,
-        TreeArity: PoseidonArity,
+        where
+            ColumnArity: PoseidonArity,
+            TreeArity: PoseidonArity,
     {
         info!("generating tree c using the CPU");
         measure_op(Operation::GenerateTreeC, || {
@@ -771,8 +770,8 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
         labels: &LabelsCache<Tree>,
         device_bus_id: BusId,
     ) -> Result<LCTree<Tree::Hasher, Tree::Arity, Tree::SubTreeArity, Tree::TopTreeArity>>
-    where
-        TreeArity: PoseidonArity,
+        where
+            TreeArity: PoseidonArity,
     {
         if SETTINGS.use_gpu_tree_builder {
             Self::generate_tree_r_last_gpu::<TreeArity>(
@@ -805,8 +804,8 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
         replica_path: PathBuf,
         labels: &LabelsCache<Tree>,
     ) -> Result<LCTree<Tree::Hasher, Tree::Arity, Tree::SubTreeArity, Tree::TopTreeArity>>
-    where
-        TreeArity: PoseidonArity,
+        where
+            TreeArity: PoseidonArity,
     {
         Self::generate_tree_r_last_cpu::<TreeArity>(
             data,
@@ -828,8 +827,8 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
         labels: &LabelsCache<Tree>,
         device_bus_id: BusId,
     ) -> Result<LCTree<Tree::Hasher, Tree::Arity, Tree::SubTreeArity, Tree::TopTreeArity>>
-    where
-        TreeArity: PoseidonArity,
+        where
+            TreeArity: PoseidonArity,
     {
         use std::cmp::min;
         use std::fs::OpenOptions;
@@ -911,7 +910,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                                 let data_node = <Tree::Hasher as Hasher>::Domain::try_from_bytes(
                                     data_node_bytes,
                                 )
-                                .expect("try_from_bytes failed");
+                                    .expect("try_from_bytes failed");
 
                                 let encoded_node = encode::<<Tree::Hasher as Hasher>::Domain>(
                                     key.into(),
@@ -944,12 +943,12 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
             s.spawn(move |_| {
                 let mut tree_builder = TreeBuilder::<Tree::Arity>::new(
                     #[cfg(feature = "gpu")]
-                    Some(BatcherType::CustomGPU(GPUSelector::BusId(bus_id))),
+                        Some(BatcherType::CustomGPU(GPUSelector::BusId(device_bus_id))),
                     nodes_count,
                     max_gpu_tree_batch_size,
                     tree_r_last_config.rows_to_discard,
                 )
-                .expect("failed to create TreeBuilder");
+                    .expect("failed to create TreeBuilder");
 
                 // Loop until all trees for all configs have been built.
                 for i in 0..config_count {
@@ -992,11 +991,11 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                         config.size.expect("config size failure"),
                         Tree::Arity::to_usize(),
                     )
-                    .expect("failed to get merkle tree leaves"),
+                        .expect("failed to get merkle tree leaves"),
                     Tree::Arity::to_usize(),
                     config.rows_to_discard,
                 )
-                .expect("failed to get merkle tree cache size");
+                    .expect("failed to get merkle tree cache size");
                 assert_eq!(tree_data_len, cache_size);
 
                 let flat_tree_data: Vec<_> = tree_data
@@ -1037,8 +1036,8 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
         replica_path: PathBuf,
         labels: &LabelsCache<Tree>,
     ) -> Result<LCTree<Tree::Hasher, Tree::Arity, Tree::SubTreeArity, Tree::TopTreeArity>>
-    where
-        TreeArity: PoseidonArity,
+        where
+            TreeArity: PoseidonArity,
     {
         let (configs, replica_config) = split_config_and_replica(
             tree_r_last_config.clone(),
@@ -1082,7 +1081,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                 encoded_data,
                 config.clone(),
             )
-            .with_context(|| format!("failed tree_r_last CPU {}/{}", i + 1, tree_count))?;
+                .with_context(|| format!("failed tree_r_last CPU {}/{}", i + 1, tree_count))?;
 
             start = end;
             end += size / tree_count;
@@ -1109,7 +1108,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
             Self::generate_labels_for_encoding(graph, layer_challenges, replica_id, config.clone())
                 .context("failed to generate labels")
         })?
-        .0;
+            .0;
 
         Self::transform_and_replicate_layers_inner(
             graph,
@@ -1120,7 +1119,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
             replica_path,
             labels,
         )
-        .context("failed to transform")
+            .context("failed to transform")
     }
 
     pub(crate) fn transform_and_replicate_layers_inner(
@@ -1383,7 +1382,7 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
         let labels = measure_op(Operation::EncodeWindowTimeAll, || {
             Self::generate_labels_for_encoding(&pp.graph, &pp.layer_challenges, replica_id, config)
         })?
-        .0;
+            .0;
 
         Ok(labels)
     }
@@ -1417,8 +1416,8 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
     }
 
     // Assumes data is all zeros.
-    // Replica path is used to create configs, but is not read.
-    // Instead new zeros are provided (hence the need for replica to be all zeros).
+// Replica path is used to create configs, but is not read.
+// Instead new zeros are provided (hence the need for replica to be all zeros).
     #[cfg(feature = "gpu")]
     fn generate_fake_tree_r_last<TreeArity>(
         nodes_count: usize,
@@ -1426,8 +1425,8 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
         tree_r_last_config: StoreConfig,
         replica_path: PathBuf,
     ) -> Result<LCTree<Tree::Hasher, Tree::Arity, Tree::SubTreeArity, Tree::TopTreeArity>>
-    where
-        TreeArity: PoseidonArity,
+        where
+            TreeArity: PoseidonArity,
     {
         use std::fs::OpenOptions;
         use std::io::Write;
@@ -1454,12 +1453,12 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
 
             let mut tree_builder = TreeBuilder::<Tree::Arity>::new(
                 #[cfg(feature = "gpu")]
-                Some(BatcherType::OpenCL),
+                    Some(BatcherType::OpenCL),
                 nodes_count,
                 max_gpu_tree_batch_size,
                 tree_r_last_config.rows_to_discard,
             )
-            .expect("failed to create TreeBuilder");
+                .expect("failed to create TreeBuilder");
 
             // Allocate zeros once and reuse.
             let zero_leaves: Vec<Fr> = vec![Fr::zero(); max_gpu_tree_batch_size];
@@ -1493,11 +1492,11 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
                             config.size.expect("config size failure"),
                             Tree::Arity::to_usize(),
                         )
-                        .expect("failed to get merkle tree leaves"),
+                            .expect("failed to get merkle tree leaves"),
                         Tree::Arity::to_usize(),
                         config.rows_to_discard,
                     )
-                    .expect("failed to get merkle tree cache size");
+                        .expect("failed to get merkle tree cache size");
                     assert_eq!(tree_data_len, cache_size);
 
                     let flat_tree_data: Vec<_> = tree_data
@@ -1547,8 +1546,8 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
     }
 
     // Assumes data is all zeros.
-    // Replica path is used to create configs, but is not read.
-    // Instead new zeros are provided (hence the need for replica to be all zeros).
+// Replica path is used to create configs, but is not read.
+// Instead new zeros are provided (hence the need for replica to be all zeros).
     #[cfg(not(feature = "gpu"))]
     fn generate_fake_tree_r_last<TreeArity>(
         nodes_count: usize,
@@ -1556,8 +1555,8 @@ impl<'a, Tree: 'static + MerkleTreeTrait, G: 'static + Hasher> StackedDrg<'a, Tr
         tree_r_last_config: StoreConfig,
         replica_path: PathBuf,
     ) -> Result<LCTree<Tree::Hasher, Tree::Arity, Tree::SubTreeArity, Tree::TopTreeArity>>
-    where
-        TreeArity: PoseidonArity,
+        where
+            TreeArity: PoseidonArity,
     {
         let (configs, replica_config) = split_config_and_replica(
             tree_r_last_config.clone(),
